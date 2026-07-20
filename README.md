@@ -1,6 +1,4 @@
-# 👁️ GuardianEye: Edge-AI Driver Safety Ecosystem
-
-![GuardianEye Banner](https://via.placeholder.com/1000x300?text=GuardianEye+-+AI+Driver+Safety)
+                                               👁️ GuardianEye: Edge-AI Driver Safety Ecosystem
 
 **GuardianEye** is a complete, full-stack Edge-AI ecosystem designed to monitor driver distraction and automate dashcam recording. It operates completely offline, processing heavy computer vision algorithms directly on-device with zero cloud latency.
 
