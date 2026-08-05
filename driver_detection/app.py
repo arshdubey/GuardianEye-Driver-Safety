@@ -1,5 +1,7 @@
 import streamlit as st
 import cv2
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode
+import av
 import mediapipe as mp
 import numpy as np
 import pandas as pd
@@ -323,179 +325,153 @@ def get_face_landmarker():
 
 face_landmarker = get_face_landmarker()
 
-if st.session_state.run:
-    if 'cap' not in st.session_state or st.session_state.cap is None or not st.session_state.cap.isOpened():
-        if hasattr(cv2, 'CAP_DSHOW'):
-            st.session_state.cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
-        else:
-            st.session_state.cap = cv2.VideoCapture(0)
-    cap = st.session_state.cap
+
+class DrowsinessVideoProcessor(VideoProcessorBase):
+    def __init__(self):
+        self.face_landmarker = get_face_landmarker()
+        self.current_state = "SAFE"
+        self.state_class = "status-safe"
+        self.current_ear = 0.0
+        self.ear_history = []
         
-    if cap is None or not cap.isOpened():
-        st.error("Error: Could not open webcam.")
-        st.session_state.run = False
-        st.rerun()
+        self.drowsy_frames = 0
+        self.no_face_frames = 0
+        self.distracted_start = None
+
+    def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
+        img = frame.to_ndarray(format="bgr24")
+        img = cv2.flip(img, 1)
+        img_h, img_w, _ = img.shape
         
-    frame_counter = 0
-    
-    try:
-        while st.session_state.run and cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                st.error("Failed to capture image")
-                st.session_state.run = False
-                break
-            
-            frame = cv2.flip(frame, 1) # Mirror effect
-            st.session_state.frame_buffer.append((time.time(), frame))
-            img_h, img_w, _ = frame.shape
+        rgb_frame = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+        detection_result = self.face_landmarker.detect(mp_image)
         
-            # Convert BGR to RGB for MediaPipe
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
-            detection_result = face_landmarker.detect(mp_image)
+        self.current_state = "SAFE"
+        self.state_class = "status-safe"
+        self.current_ear = 0.0
+        pitch, yaw, roll = 0, 0, 0
+        box_color = (0, 242, 254)
         
-            # Default State
-            current_state = "SAFE"
-            state_class = "status-safe"
-            current_ear = 0.0
-            pitch, yaw, roll = 0, 0, 0
-            box_color = (0, 242, 254) # Cyan for safe
+        if detection_result.face_landmarks:
+            self.no_face_frames = 0
+            landmarks = detection_result.face_landmarks[0]
+            
+            class Point:
+                def __init__(self, x, y):
+                    self.x = x
+                    self.y = y
         
-            if detection_result.face_landmarks:
-                st.session_state.no_face_frames = 0
-                landmarks = detection_result.face_landmarks[0]
+            scaled_landmarks = [Point(lm.x * img_w, lm.y * img_h) for lm in landmarks]
+            left_ear = calculate_ear(scaled_landmarks, LEFT_EYE)
+            right_ear = calculate_ear(scaled_landmarks, RIGHT_EYE)
+            self.current_ear = (left_ear + right_ear) / 2.0
             
-                # 1. EAR Calculation
-                # Scale landmarks to image dimensions for accurate distance
-                class Point:
-                    def __init__(self, x, y):
-                        self.x = x
-                        self.y = y
-            
-                scaled_landmarks = [Point(lm.x * img_w, lm.y * img_h) for lm in landmarks]
-            
-                left_ear = calculate_ear(scaled_landmarks, LEFT_EYE)
-                right_ear = calculate_ear(scaled_landmarks, RIGHT_EYE)
-                current_ear = (left_ear + right_ear) / 2.0
-            
-                # Update EAR history
-                st.session_state.ear_history.append(current_ear)
-                if len(st.session_state.ear_history) > 60:
-                    st.session_state.ear_history.pop(0)
+            self.ear_history.append(self.current_ear)
+            if len(self.ear_history) > 60:
+                self.ear_history.pop(0)
                 
-                # 2. Head Pose Calculation
-                if detection_result.facial_transformation_matrixes:
-                    matrix = detection_result.facial_transformation_matrixes[0]
-                    pitch, yaw, roll = matrix_to_euler(matrix)
-                else:
-                    pitch, yaw, roll = 0, 0, 0
+            if detection_result.facial_transformation_matrixes:
+                matrix = detection_result.facial_transformation_matrixes[0]
+                pitch, yaw, roll = matrix_to_euler(matrix)
+                
+            is_drowsy = self.current_ear < EAR_THRESH
+            is_distracted = (abs(yaw) > 20) or (abs(pitch) > 20)
             
-                # 3. Logic & State Machine
-                is_drowsy = current_ear < EAR_THRESH
-                is_distracted = (abs(yaw) > 20) or (abs(pitch) > 20) # Head turned away
+            if is_drowsy:
+                self.drowsy_frames += 1
+                if self.drowsy_frames >= DROWSY_FRAMES_THRESH:
+                    self.current_state = "DROWSY"
+                    self.state_class = "status-drowsy"
+                    box_color = (85, 0, 255)
+                    trigger_alarm()
+            else:
+                self.drowsy_frames = max(0, self.drowsy_frames - 1)
             
-                if is_drowsy:
-                    st.session_state.drowsy_frames += 1
-                    if st.session_state.drowsy_frames >= DROWSY_FRAMES_THRESH:
-                        current_state = "DROWSY"
-                        state_class = "status-drowsy"
-                        box_color = (85, 0, 255) # Red (BGR)
+            if self.current_state != "DROWSY":
+                if is_distracted:
+                    if self.distracted_start is None:
+                        self.distracted_start = time.time()
+                    elif time.time() - self.distracted_start > DISTRACT_TIME_THRESH:
+                        self.current_state = "DISTRACTED"
+                        self.state_class = "status-distracted"
+                        box_color = (15, 196, 241)
                         trigger_alarm()
                 else:
-                    st.session_state.drowsy_frames = max(0, st.session_state.drowsy_frames - 1)
-                
-                if current_state != "DROWSY":
-                    if is_distracted:
-                        if st.session_state.distracted_start is None:
-                            st.session_state.distracted_start = time.time()
-                        elif time.time() - st.session_state.distracted_start > DISTRACT_TIME_THRESH:
-                            current_state = "DISTRACTED"
-                            state_class = "status-distracted"
-                            box_color = (15, 196, 241) # Amber (BGR)
-                            trigger_alarm()
-                    else:
-                        st.session_state.distracted_start = None
-            
-                # 4. Drawing on Frame
-                if PRIVACY_MODE:
-                    frame = np.zeros_like(frame)
+                    self.distracted_start = None
                     
-                # Draw Face Bounding Box
-                xs = [int(lm.x * img_w) for lm in landmarks]
-                ys = [int(lm.y * img_h) for lm in landmarks]
-                x_min, x_max = min(xs), max(xs)
-                y_min, y_max = min(ys), max(ys)
-            
-                # Add padding
-                pad_w = int((x_max - x_min) * 0.1)
-                pad_h = int((y_max - y_min) * 0.1)
-            
-                pt1 = (max(0, x_min - pad_w), max(0, y_min - pad_h))
-                pt2 = (min(img_w, x_max + pad_w), min(img_h, y_max + pad_h))
-            
-                draw_styled_rect(frame, pt1, pt2, box_color, thickness=2)
-            
-                # Draw Mesh Dots
-                for lm in landmarks:
-                    x, y = int(lm.x * img_w), int(lm.y * img_h)
-                    cv2.circle(frame, (x, y), 1, box_color, -1)
-                
-                # Draw Text on Frame
-                cv2.putText(frame, f"EAR: {current_ear:.2f}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, box_color, 2)
-                cv2.putText(frame, f"STATE: {current_state}", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 1, box_color, 2)
-            
-            else:
-                # No face detected
-                st.session_state.no_face_frames += 1
-                if st.session_state.no_face_frames > 15:
-                    current_state = "NO FACE"
-                    state_class = "status-distracted"
-                    trigger_alarm()
-            
-            # Display Video
             if PRIVACY_MODE:
-                cv2.putText(frame, "Closed-Loop Ephemeral Processing Active (Zero Local Recording)", (20, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-            
-            rgb_display = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            video_placeholder.image(rgb_display, channels="RGB", use_container_width=True)
-        
-            # Optimize UI Updates: Only update chart and status every 3 frames to prevent websocket lag
-            frame_counter += 1
-            if frame_counter % 3 == 0:
-                status_html = f"""
-                <div class="status-card {state_class}">
-                    <div class="status-title">System Status</div>
-                    <div class="status-value">{current_state}</div>
-                </div>
-                """
-                status_placeholder.markdown(status_html, unsafe_allow_html=True)
-            
-                if len(st.session_state.ear_history) > 0:
-                    df = pd.DataFrame({
-                        'Frame': range(len(st.session_state.ear_history)),
-                        'EAR': st.session_state.ear_history
-                    })
+                img = np.zeros_like(img)
                 
-                    chart = alt.Chart(df).mark_line(color='#00f2fe', strokeWidth=3).encode(
-                        x=alt.X('Frame:Q', title='', axis=alt.Axis(labels=False, ticks=False)),
-                        y=alt.Y('EAR:Q', scale=alt.Scale(domain=[0.1, 0.4]), title='Eye Aspect Ratio (EAR)')
-                    )
-                
-                    rule = alt.Chart(pd.DataFrame({'threshold': [EAR_THRESH]})).mark_rule(
-                        color='#ff0055', strokeDash=[5, 5], strokeWidth=2
-                    ).encode(y='threshold:Q')
-                
-                    chart_placeholder.altair_chart(chart + rule, use_container_width=True)
+            xs = [int(lm.x * img_w) for lm in landmarks]
+            ys = [int(lm.y * img_h) for lm in landmarks]
+            x_min, x_max = min(xs), max(xs)
+            y_min, y_max = min(ys), max(ys)
+            pad_w = int((x_max - x_min) * 0.1)
+            pad_h = int((y_max - y_min) * 0.1)
+            pt1 = (max(0, x_min - pad_w), max(0, y_min - pad_h))
+            pt2 = (min(img_w, x_max + pad_w), min(img_h, y_max + pad_h))
+            draw_styled_rect(img, pt1, pt2, box_color, thickness=2)
             
-                time.sleep(0.01) # Small yield to keep event loop responsive
-    finally:
-        pass # Camera release is handled by the toggle_system callback
+            for lm in landmarks:
+                x, y = int(lm.x * img_w), int(lm.y * img_h)
+                cv2.circle(img, (x, y), 1, box_color, -1)
+                
+            cv2.putText(img, f"EAR: {self.current_ear:.2f}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, box_color, 2)
+            cv2.putText(img, f"STATE: {self.current_state}", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 1, box_color, 2)
+        else:
+            self.no_face_frames += 1
+            if self.no_face_frames > 15:
+                self.current_state = "NO FACE"
+                self.state_class = "status-distracted"
+                trigger_alarm()
+                
+        if PRIVACY_MODE:
+            cv2.putText(img, "Closed-Loop Ephemeral Processing Active (Zero Local Recording)", (20, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+            
+        return av.VideoFrame.from_ndarray(img, format="bgr24")
 
+if st.session_state.run:
+    with video_placeholder.container():
+        ctx = webrtc_streamer(
+            key="drowsiness",
+            mode=WebRtcMode.SENDRECV,
+            video_processor_factory=DrowsinessVideoProcessor,
+            async_processing=True,
+            rtc_configuration={
+                "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
+            }
+        )
+        
+    while ctx and ctx.state.playing:
+        if ctx.video_processor:
+            state_class = ctx.video_processor.state_class
+            current_state = ctx.video_processor.current_state
+            
+            status_html = f"""
+            <div class="status-card {state_class}">
+                <div class="status-title">System Status</div>
+                <div class="status-value">{current_state}</div>
+            </div>
+            """
+            status_placeholder.markdown(status_html, unsafe_allow_html=True)
+            
+            ear_history = ctx.video_processor.ear_history
+            if len(ear_history) > 0:
+                df = pd.DataFrame({
+                    'Frame': range(len(ear_history)),
+                    'EAR': ear_history
+                })
+                chart = alt.Chart(df).mark_line(color='#00f2fe', strokeWidth=3).encode(
+                    x=alt.X('Frame:Q', title='', axis=alt.Axis(labels=False, ticks=False)),
+                    y=alt.Y('EAR:Q', scale=alt.Scale(domain=[0.1, 0.4]), title='Eye Aspect Ratio (EAR)')
+                )
+                rule = alt.Chart(pd.DataFrame({'threshold': [EAR_THRESH]})).mark_rule(
+                    color='#ff0055', strokeDash=[5, 5], strokeWidth=2
+                ).encode(y='threshold:Q')
+                chart_placeholder.altair_chart(chart + rule, use_container_width=True)
+        time.sleep(0.1)
 else:
-    if 'cap' in st.session_state and st.session_state.cap is not None:
-        st.session_state.cap.release()
-        st.session_state.cap = None
     video_placeholder.empty()
     video_placeholder.info("System Standby - Camera Offline")
     status_placeholder.markdown("""
