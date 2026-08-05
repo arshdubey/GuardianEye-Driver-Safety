@@ -6,7 +6,10 @@ import pandas as pd
 import altair as alt
 import time
 import threading
-import winsound
+try:
+    import winsound
+except ImportError:
+    winsound = None
 import queue
 import os
 from collections import deque
@@ -117,7 +120,8 @@ def trigger_alarm():
     # SND_NOSTOP ensures that if the alarm is already playing, the call is ignored.
     # This prevents the 30FPS while-loop from constantly restarting the audio track every frame!
     try:
-        winsound.PlaySound(get_asset_path("alarm.wav"), winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NOSTOP)
+        if winsound:
+            winsound.PlaySound(get_asset_path("alarm.wav"), winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NOSTOP)
     except RuntimeError:
         pass
 
@@ -321,7 +325,10 @@ face_landmarker = get_face_landmarker()
 
 if st.session_state.run:
     if 'cap' not in st.session_state or st.session_state.cap is None or not st.session_state.cap.isOpened():
-        st.session_state.cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+        if hasattr(cv2, 'CAP_DSHOW'):
+            st.session_state.cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+        else:
+            st.session_state.cap = cv2.VideoCapture(0)
     cap = st.session_state.cap
         
     if cap is None or not cap.isOpened():
