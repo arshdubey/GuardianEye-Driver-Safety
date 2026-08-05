@@ -443,34 +443,12 @@ if st.session_state.run:
             }
         )
         
-    while ctx and ctx.state.playing:
-        if ctx.video_processor:
-            state_class = ctx.video_processor.state_class
-            current_state = ctx.video_processor.current_state
-            
-            status_html = f"""
-            <div class="status-card {state_class}">
-                <div class="status-title">System Status</div>
-                <div class="status-value">{current_state}</div>
-            </div>
-            """
-            status_placeholder.markdown(status_html, unsafe_allow_html=True)
-            
-            ear_history = ctx.video_processor.ear_history
-            if len(ear_history) > 0:
-                df = pd.DataFrame({
-                    'Frame': range(len(ear_history)),
-                    'EAR': ear_history
-                })
-                chart = alt.Chart(df).mark_line(color='#00f2fe', strokeWidth=3).encode(
-                    x=alt.X('Frame:Q', title='', axis=alt.Axis(labels=False, ticks=False)),
-                    y=alt.Y('EAR:Q', scale=alt.Scale(domain=[0.1, 0.4]), title='Eye Aspect Ratio (EAR)')
-                )
-                rule = alt.Chart(pd.DataFrame({'threshold': [EAR_THRESH]})).mark_rule(
-                    color='#ff0055', strokeDash=[5, 5], strokeWidth=2
-                ).encode(y='threshold:Q')
-                chart_placeholder.altair_chart(chart + rule, use_container_width=True)
-        time.sleep(0.1)
+    status_placeholder.markdown("""
+    <div class="status-card status-safe">
+        <div class="status-title">System Status</div>
+        <div class="status-value" style="font-size: 1.2rem;">MONITORING LIVE FEED<br>(See video for metrics)</div>
+    </div>
+    """, unsafe_allow_html=True)
 else:
     video_placeholder.empty()
     video_placeholder.info("System Standby - Camera Offline")
